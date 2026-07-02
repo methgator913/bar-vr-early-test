@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GOD TABLE — a BAR-flavoured VR god prototype</title>
+<style>
+  :root{
+    --void:#05070d; --panel:#0c1220; --ink:#c8d6d2;
+    --arm:#2bd9c8; --core:#ff5b39; --gold:#ffd27a;
+  }
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:var(--void);overflow:hidden;
+    font-family:"Segoe UI",system-ui,sans-serif;color:var(--ink)}
+  canvas{display:block}
+  #hud{position:fixed;top:0;left:0;right:0;padding:14px 18px;
+    display:flex;justify-content:space-between;align-items:flex-start;
+    pointer-events:none;z-index:5}
+  #title{font-size:13px;letter-spacing:.35em;text-transform:uppercase;color:var(--gold)}
+  #title b{color:var(--arm);font-weight:600}
+  #hint{font-size:12px;opacity:.75;max-width:340px;text-align:right;line-height:1.5}
+  #vrbtn{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);
+    z-index:6;padding:12px 34px;border-radius:4px;cursor:pointer;
+    background:transparent;color:var(--gold);border:1px solid var(--gold);
+    font-size:13px;letter-spacing:.25em;text-transform:uppercase}
+  #vrbtn:hover{background:var(--gold);color:var(--void)}
+  #vrbtn:disabled{opacity:.4;cursor:default}
+</style>
+</head>
+<body>
+<div id="hud">
+  <div id="title"><b>GOD TABLE</b> · vr god-view prototype</div>
+  <div id="hint">
+    VR: <span style="color:var(--gold)">grip</span> near a tank to grab it — fling it across the map.
+    <span style="color:var(--gold)">Trigger</span> to place a turret where you point.<br>
+    Desktop preview: drag to orbit, wheel to zoom, click terrain to place a turret.
+  </div>
+</div>
+<button id="vrbtn" disabled>checking vr…</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+/* ============================================================
+   GOD TABLE — grab-and-fling god prototype (WebXR, three r128)
+   A taste of "Beyond All Reason as Gods of Gravity".
+   ============================================================ */
+
+const VOID = 0x05070d, ARM = 0x2bd9c8, CORE = 0xff5b39, GOLD = 0xffd27a;
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(VOID);
+scene.fog = new THREE.Fog(VOID, 6, 14);
+
+const camera = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, .02, 60);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+/* ---------- lighting: cold void, warm godlight ---------- */
+scene.add(new THREE.HemisphereLight(0x8fb8c9, 0x0a1610, .55));
+const sun = new THREE.DirectionalLight(0xfff1d0, .9);
+sun.position.set(3, 5, 2);
+scene.add(sun);
+
+/* ---------- the diorama table ---------- */
+// world group sits like a war table in front of the player
+const table = new THREE.Group();
+table.position.set(0, 0.85, -0.9);
+scene.add(table);
+
+const T = { size: 1.6, seg: 56 };                 // ~1.6 m square diorama
+function terrainH(x, z){                          // analytic height (metres, local)
+  const u = x / T.size * 6, v = z / T.size * 6;
+  let h = Math.sin(u*1.3)*Math.cos(v*0.9)*0.05
+        + Math.sin(u*0.4 + 1.7)*0.07
+        + Math.cos(v*0.5 - 0.6)*0.05
+        + Math.sin((u+v)*2.1)*0.012;
+  const r = Math.sqrt(x*x + z*z) / (T.size*0.5);
+  h *= Math.max(0, 1 - Math.pow(r, 4));           // flatten toward edges
+  return Math.max(h, -0.02);
+}
+(function buildTerrain(){
+  const g = new THREE.PlaneGeometry(T.size, T.size, T.seg, T.seg);
+  g.rotateX(-Math.PI/2);
+  const pos = g.attributes.position, colors = [];
+  const cLow = new THREE.Color(0x1d4d43), cMid = new THREE.Color(0x3f7050),
+        cHi  = new THREE.Color(0x8f9aa3), c = new THREE.Color();
+  for(let i=0;i<pos.count;i++){
+    const x = pos.getX(i), z = pos.getZ(i), h = terrainH(x,z);
+    pos.setY(i, h);
+    const t = THREE.MathUtils.clamp((h + .02) / .16, 0, 1);
+    (t < .5 ? c.copy(cLow).lerp(cMid, t*2) : c.copy(cMid).lerp(cHi,(t-.5)*2));
+    colors.push(c.r, c.g, c.b);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  g.computeVertexNormals();
+  const terrain = new THREE.Mesh(g,
+    new THREE.MeshStandardMaterial({vertexColors:true, flatShading:true, roughness:.95}));
+  terrain.name = 'terrain';
+  table.add(terrain);
+  // slab base
+  const base = new THREE.Mesh(
+    new THREE.CylinderGeometry(T.size*0.78, T.size*0.84, 0.07, 8),
+    new THREE.MeshStandardMaterial({color:0x10161f, roughness:.6, metalness:.4}));
+  base.position.y = -0.055;
+  table.add(base);
+  // gold rim — the god table's signature edge
+  const rim = new THREE.Mesh(
+    new THREE.TorusGeometry(T.size*0.79, 0.006, 8, 64),
+    new THREE.MeshBasicMaterial({color:GOLD}));
+  rim.rotation.x = Math.PI/2; rim.position.y = -0.018;
+  table.add(rim);
+})();
+
+/* ---------- units: little tanks that wander ---------- */
+const units = [];
+function makeTank(team){
+  const col = team === 0 ? ARM : CORE;
+  const grp = new THREE.Group();
+  const body = new THREE.MeshStandardMaterial({color:col, roughness:.55, metalness:.25});
+  const dark = new THREE.MeshStandardMaterial({color:0x11181f, roughness:.8});
+  const hull = new THREE.Mesh(new THREE.BoxGeometry(.05,.018,.07), body);
+  hull.position.y = .017; grp.add(hull);
+  const tur = new THREE.Mesh(new THREE.BoxGeometry(.028,.016,.032), body);
+  tur.position.y = .034; grp.add(tur);
+  const gun = new THREE.Mesh(new THREE.CylinderGeometry(.004,.004,.045,6), dark);
+  gun.rotation.x = Math.PI/2; gun.position.set(0,.034,.04); grp.add(gun);
+  const tr1 = new THREE.Mesh(new THREE.BoxGeometry(.014,.014,.075), dark);
+  tr1.position.set(.024,.008,0); grp.add(tr1.clone().translateX(-.048), tr1);
+  grp.userData = { team, hp:3, grabbed:false, vel:new THREE.Vector3(),
+                   airborne:false, heading:Math.random()*Math.PI*2,
+                   turn:0, speed:.02 + Math.random()*.015 };
+  return grp;
+}
+function spawnUnits(){
+  for(let i=0;i<7;i++)  placeUnit(makeTank(0), -T.size*.28, 0);   // ARM west
+  for(let i=0;i<7;i++)  placeUnit(makeTank(1),  T.size*.28, 0);   // CORE east
+}
+function placeUnit(u, cx, cz){
+  const x = cx + (Math.random()-.5)*T.size*.3;
+  const z = cz + (Math.random()-.5)*T.size*.55;
+  u.position.set(x, terrainH(x,z), z);
+  table.add(u); units.push(u);
+}
+spawnUnits();
+
+/* ---------- turrets ---------- */
+const turrets = [];
+function placeTurret(localPos){
+  const grp = new THREE.Group();
+  const m = new THREE.MeshStandardMaterial({color:ARM, roughness:.4, metalness:.5});
+  const post = new THREE.Mesh(new THREE.CylinderGeometry(.012,.018,.05,6), m);
+  post.position.y = .025; grp.add(post);
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(.016,10,8),
+    new THREE.MeshStandardMaterial({color:GOLD, emissive:GOLD, emissiveIntensity:.6}));
+  orb.position.y = .062; grp.add(orb);
+  grp.position.copy(localPos);
+  grp.position.y = terrainH(localPos.x, localPos.z);
+  grp.userData = {cool: 0, orb};
+  table.add(grp); turrets.push(grp);
+}
+const zaps = [];   // {line, life}
+function fireZap(from, target){
+  const g = new THREE.BufferGeometry().setFromPoints([from.clone(), target.position.clone().add(new THREE.Vector3(0,.03,0))]);
+  const line = new THREE.Line(g, new THREE.LineBasicMaterial({color:GOLD}));
+  table.add(line); zaps.push({line, life:.12});
+  if(--target.userData.hp <= 0) killUnit(target);
+}
+const puffs = []; // {mesh, life}
+function puff(pos, col){
+  const ring = new THREE.Mesh(new THREE.RingGeometry(.01,.02,20),
+    new THREE.MeshBasicMaterial({color:col, transparent:true, side:THREE.DoubleSide}));
+  ring.rotation.x = -Math.PI/2;
+  ring.position.copy(pos); ring.position.y += .005;
+  table.add(ring); puffs.push({mesh:ring, life:.4});
+}
+function killUnit(u){
+  puff(u.position, CORE);
+  table.remove(u);
+  const i = units.indexOf(u); if(i>-1) units.splice(i,1);
+}
+
+/* ---------- god hands (VR controllers) ---------- */
+const hands = [];
+function makeHand(i){
+  const c = renderer.xr.getController(i);
+  const orb = new THREE.Mesh(new THREE.SphereGeometry(.02,12,10),
+    new THREE.MeshBasicMaterial({color:GOLD, transparent:true, opacity:.85}));
+  const halo = new THREE.PointLight(GOLD, .5, .35);
+  const ray = new THREE.Line(
+    new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3(0,0,-1)]),
+    new THREE.LineBasicMaterial({color:GOLD, transparent:true, opacity:.25}));
+  ray.scale.z = 3;
+  c.add(orb, halo, ray);
+  c.userData = {held:null, prev:new THREE.Vector3(), vel:new THREE.Vector3()};
+  c.addEventListener('squeezestart', ()=>grab(c));
+  c.addEventListener('squeezeend',   ()=>release(c));
+  c.addEventListener('selectstart',  ()=>pointPlace(c));
+  scene.add(c); hands.push(c);
+}
+makeHand(0); makeHand(1);
+
+const _w = new THREE.Vector3(), _l = new THREE.Vector3();
+function grab(c){
+  if(c.userData.held) return;
+  c.getWorldPosition(_w);
+  let best = null, bd = .09;                       // grab radius 9 cm
+  for(const u of units){
+    if(u.userData.grabbed) continue;
+    u.getWorldPosition(_l);
+    const d = _l.distanceTo(_w);
+    if(d < bd){ bd = d; best = u; }
+  }
+  if(!best) return;
+  best.userData.grabbed = true;
+  table.remove(best); c.add(best);
+  best.position.set(0,0,-.03); best.rotation.set(.4,0,0);
+  c.userData.held = best;
+}
+function release(c){
+  const u = c.userData.held; if(!u) return;
+  c.userData.held = null;
+  u.getWorldPosition(_w);
+  c.remove(u); table.add(u);
+  u.position.copy(table.worldToLocal(_w.clone()));
+  u.rotation.set(0, u.userData.heading, 0);
+  u.userData.grabbed = false;
+  u.userData.airborne = true;
+  u.userData.vel.copy(c.userData.vel).multiplyScalar(1.1);  // fling!
+}
+const raycaster = new THREE.Raycaster();
+function pointPlace(c){
+  if(c.userData.held) return;
+  const m = c.matrixWorld;
+  raycaster.ray.origin.setFromMatrixPosition(m);
+  raycaster.ray.direction.set(0,0,-1).transformDirection(m);
+  const hit = raycaster.intersectObject(table.getObjectByName('terrain'))[0];
+  if(hit) { placeTurret(table.worldToLocal(hit.point.clone())); puff(table.worldToLocal(hit.point.clone()), GOLD); }
+}
+
+/* ---------- desktop preview controls ---------- */
+let theta = .5, phi = 1.05, dist = 2.2, dragging = false, px=0, py=0;
+function applyOrbit(){
+  camera.position.set(
+    Math.sin(theta)*Math.cos(phi)*dist,
+    1.0 + Math.sin(phi)*dist*.55,
+    Math.cos(theta)*Math.cos(phi)*dist - .3);
+  camera.lookAt(0, .85, -.9);
+}
+applyOrbit();
+addEventListener('mousedown', e=>{dragging=true; px=e.clientX; py=e.clientY;});
+addEventListener('mouseup',   e=>{
+  if(Math.abs(e.clientX-px)<4 && Math.abs(e.clientY-py)<4 && !renderer.xr.isPresenting){
+    raycaster.setFromCamera(new THREE.Vector2(e.clientX/innerWidth*2-1, -(e.clientY/innerHeight)*2+1), camera);
+    const hit = raycaster.intersectObject(table.getObjectByName('terrain'))[0];
+    if(hit) placeTurret(table.worldToLocal(hit.point.clone()));
+  }
+  dragging=false;
+});
+addEventListener('mousemove', e=>{
+  if(!dragging) return;
+  theta -= (e.clientX-px)*.005; phi = THREE.MathUtils.clamp(phi+(e.clientY-py)*.005, .15, 1.45);
+  px=e.clientX; py=e.clientY; applyOrbit();
+});
+addEventListener('wheel', e=>{ dist = THREE.MathUtils.clamp(dist + e.deltaY*.002, 1.1, 5); applyOrbit(); });
+addEventListener('resize', ()=>{
+  camera.aspect = innerWidth/innerHeight; camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+/* ---------- VR button ---------- */
+const btn = document.getElementById('vrbtn');
+if(navigator.xr){
+  navigator.xr.isSessionSupported('immersive-vr').then(ok=>{
+    btn.disabled = !ok;
+    btn.textContent = ok ? 'enter vr' : 'vr not available — desktop preview';
+  });
+} else btn.textContent = 'webxr not available — desktop preview';
+btn.onclick = async ()=>{
+  const session = await navigator.xr.requestSession('immersive-vr',
+    {optionalFeatures:['local-floor','bounded-floor']});
+  session.addEventListener('end', ()=>{ btn.textContent='enter vr'; });
+  await renderer.xr.setSession(session);
+  btn.textContent = 'in session';
+};
+
+/* ---------- simulation ---------- */
+const clock = new THREE.Clock();
+const edge = T.size*0.42;
+function step(dt){
+  // hand velocity (for flinging)
+  for(const c of hands){
+    c.getWorldPosition(_w);
+    c.userData.vel.copy(_w).sub(c.userData.prev).divideScalar(Math.max(dt,.001));
+    c.userData.prev.copy(_w);
+  }
+  // units
+  for(const u of units){
+    const d = u.userData;
+    if(d.grabbed) continue;
+    if(d.airborne){
+      d.vel.y -= 2.5*dt;                            // gentle diorama gravity
+      u.position.addScaledVector(d.vel, dt);
+      const gh = terrainH(u.position.x, u.position.z);
+      if(u.position.y <= gh){
+        u.position.y = gh; d.airborne = false; d.vel.set(0,0,0);
+        puff(u.position, d.team===0?ARM:CORE);
+      }
+      continue;
+    }
+    // wander
+    d.turn += (Math.random()-.5)*dt*2;
+    d.heading += d.turn*dt;
+    u.position.x += Math.sin(d.heading)*d.speed*dt;
+    u.position.z += Math.cos(d.heading)*d.speed*dt;
+    const r = Math.hypot(u.position.x, u.position.z);
+    if(r > edge){ d.heading += Math.PI; d.turn = 0; }
+    u.position.y = terrainH(u.position.x, u.position.z);
+    u.rotation.y = d.heading;
+  }
+  // turrets zap nearest CORE unit in range
+  for(const t of turrets){
+    t.userData.cool -= dt;
+    t.userData.orb.material.emissiveIntensity = .4 + Math.sin(clock.elapsedTime*4)*.25;
+    if(t.userData.cool > 0) continue;
+    let best=null, bd=.38;
+    for(const u of units){
+      if(u.userData.team !== 1 || u.userData.grabbed) continue;
+      const d = u.position.distanceTo(t.position);
+      if(d < bd){ bd=d; best=u; }
+    }
+    if(best){ fireZap(t.position.clone().add(new THREE.Vector3(0,.062,0)), best); t.userData.cool = 1.4; }
+  }
+  // effects decay
+  for(let i=zaps.length-1;i>=0;i--){
+    zaps[i].life -= dt;
+    if(zaps[i].life<=0){ table.remove(zaps[i].line); zaps.splice(i,1); }
+  }
+  for(let i=puffs.length-1;i>=0;i--){
+    const p = puffs[i]; p.life -= dt;
+    p.mesh.scale.multiplyScalar(1 + dt*6);
+    p.mesh.material.opacity = p.life*2.2;
+    if(p.life<=0){ table.remove(p.mesh); puffs.splice(i,1); }
+  }
+}
+
+renderer.setAnimationLoop(()=>{
+  step(Math.min(clock.getDelta(), .05));
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>
