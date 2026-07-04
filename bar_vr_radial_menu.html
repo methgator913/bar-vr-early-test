@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>BAR VR — Holo Command Table</title>
+<style>
+  :root{ --bg:#070d0f; --steel:#26343a; --text:#d4ece8; --dim:#5f7a80; }
+  html,body{ margin:0; padding:0; height:100%; overflow:hidden;
+    background:radial-gradient(circle at 50% 30%, #0d181b 0%, #070d0f 70%);
+    font-family:'Segoe UI',system-ui,sans-serif; color:var(--text); }
+  #scene{ position:absolute; inset:0; } canvas{ display:block; }
+  #hud{ position:absolute; top:0; left:0; right:0; display:flex; justify-content:space-between;
+    align-items:flex-start; padding:16px 20px; pointer-events:none; }
+  #title{ font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--dim); }
+  #title b{ color:var(--text); font-weight:700; }
+  #instructions{ background:rgba(13,24,27,.82); border:1px solid var(--steel); border-radius:6px;
+    padding:10px 14px; font-size:12px; line-height:1.7; color:var(--dim); max-width:290px; }
+  #instructions b{ color:var(--text); }
+  kbd{ background:var(--steel); color:var(--text); border-radius:3px; padding:1px 6px; font-size:11px; border-bottom:2px solid #030607; }
+  #status{ position:absolute; bottom:16px; left:20px; font-size:12px; color:var(--dim);
+    background:rgba(13,24,27,.82); border:1px solid var(--steel); border-radius:6px; padding:8px 12px; pointer-events:none; }
+  .row{ display:flex; gap:8px; } .label{ color:var(--dim); width:82px; display:inline-block; } .val{ color:var(--text); font-weight:600; }
+  #reticle{ position:absolute; width:16px; height:16px; border:2px solid var(--text); border-radius:50%;
+    transform:translate(-50%,-50%); pointer-events:none; transition:border-color .1s, transform .08s; mix-blend-mode:screen; }
+  #reticle::after{ content:''; position:absolute; inset:5px; border-radius:50%; background:var(--text); opacity:.7; }
+  #reticle.pinch{ transform:translate(-50%,-50%) scale(.5); border-color:#7ff0c0; }
+  #reticle.hover{ border-color:#fff; box-shadow:0 0 12px rgba(120,240,220,.8); }
+  #vr-btn{ position:absolute; bottom:20px; left:50%; transform:translateX(-50%); background:#0f2b26; color:#aef0e2;
+    border:1px solid #2fa48f; border-radius:8px; padding:12px 26px; font-size:14px; font-weight:700; letter-spacing:.06em;
+    text-transform:uppercase; cursor:pointer; box-shadow:0 0 18px rgba(47,164,143,.35); }
+  #vr-btn:hover{ background:#16463c; }
+  #vr-btn.disabled{ background:#1a2224; color:#5f7a80; border-color:#26343a; cursor:default; box-shadow:none; letter-spacing:.02em; }
+</style>
+</head>
+<body>
+<div id="scene"></div>
+<div id="hud">
+  <div id="title">BEYOND ALL REASON — <b>HOLO COMMAND TABLE</b></div>
+  <div id="instructions">
+    <b>Desktop test</b><br>
+    Mouse aims · <kbd>click</kbd> = pinch<br>
+    Click a unit → its bio + commands appear on the off-hand<br>
+    Pick a command, then click the table/enemy to issue it<br>
+    Build radial shows when a builder / nothing is selected<br>
+    <kbd>wheel</kbd> zoom · <kbd>right-drag</kbd> rotate · <kbd>shift+right-drag</kbd> pan · <kbd>Esc</kbd> deselect<br>
+    <br><b>In VR</b>: off-hand = tablet · main-hand points · <b>grip</b> (one or both hands) to grab-transform the table
+  </div>
+</div>
+<div id="status">
+  <div class="row"><span class="label">Surface</span><span class="val" id="s-face">radial</span></div>
+  <div class="row"><span class="label">Selected</span><span class="val" id="s-sel">—</span></div>
+  <div class="row"><span class="label">Command</span><span class="val" id="s-cmd">—</span></div>
+</div>
+<div id="reticle"></div>
+<button id="vr-btn">Enter VR</button>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function(){
+  // ================= scene =================
+  const scene = new THREE.Scene();
+  scene.fog = new THREE.Fog(0x070d0f, 18, 52);
+  const camera = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.1, 200);
+  camera.position.set(0, 9, 12); camera.lookAt(0,0,0);
+  const renderer = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  renderer.setSize(innerWidth, innerHeight); renderer.setPixelRatio(Math.min(devicePixelRatio,2));
+  renderer.xr.enabled = true; renderer.xr.setReferenceSpaceType('local-floor');
+  document.getElementById('scene').appendChild(renderer.domElement);
+  const inVR = ()=>renderer.xr.isPresenting;
+  addEventListener('resize', ()=>{ camera.aspect=innerWidth/innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth,innerHeight); });
+  scene.add(new THREE.HemisphereLight(0x8fb8c9, 0x120e0a, 0.95));
+  const keyL = new THREE.DirectionalLight(0xfff3d6, 0.8); keyL.position.set(6,12,4); scene.add(keyL);
+
+  // ============ table (tableRoot = base placement; envGroup = user grab transform) ============
+  const tableRoot = new THREE.Group(); scene.add(tableRoot);
+  const envGroup = new THREE.Group(); tableRoot.add(envGroup);
+  const table = new THREE.Mesh(new THREE.CircleGeometry(9,64), new THREE.MeshStandardMaterial({color:0x162420, roughness:0.92}));
+  table.rotation.x = -Math.PI/2; envGroup.add(table);
+  const grid = new THREE.GridHelper(18,36,0x244a44,0x152e2a); grid.position.y=0.01; envGroup.add(grid);
+  function layoutBase(){
+    if(inVR()){ tableRoot.scale.setScalar(0.09); tableRoot.position.set(0,0.78,-0.35); }
+    else { tableRoot.scale.setScalar(1); tableRoot.position.set(0,0,0); }
+  }
+
+  // ================= unit defs & bios =================
+  const DEFS = {
+    commander:{key:'commander', name:'Commander', role:'Prime Builder', hp:3000, speed:1.4, dps:120, m:0, e:0, color:0x9ff0dc, shape:'box', build:true,
+      desc:'Your prime constructor — builds the base and packs a heavy D-gun.'},
+    trooper:{key:'trooper', name:'Trooper', role:'Assault Bot', hp:520, speed:1.8, dps:64, m:55, e:80, color:0x6fd0ff, shape:'cone', build:false,
+      desc:'Cheap frontline assault bot; strong in numbers, weak alone.'},
+    scout:{key:'scout', name:'Scout', role:'Fast Recon', hp:120, speed:3.6, dps:8, m:35, e:70, color:0x9fe0a0, shape:'tetra', build:false,
+      desc:'Fast, fragile recon for spotting and early raids.'},
+    extractor:{key:'extractor', name:'Extractor', role:'Metal Structure', hp:280, speed:0, dps:0, m:45, e:0, color:0xe0c060, shape:'cyl', build:false, structure:true,
+      desc:'Sits on a metal spot and produces steady metal income.'},
+    nanoturret:{key:'nanoturret', name:'Nanoturret', role:'Build Turret', hp:340, speed:0, dps:0, m:75, e:360, color:0xf0a53c, shape:'cyl', build:true, structure:true,
+      desc:'Static turret that assists building and repairs nearby units.'},
+  };
+  const MAXHP = 3000, MAXM=260, MAXE=960;
+
+  // radial categories → each maps to a buildable def
+  const CATS = [
+    {id:'economy', label:'ECONOMY', hot:'Z', color:'#4a90d9', icon:'hex',     def:'extractor'},
+    {id:'combat',  label:'COMBAT',  hot:'X', color:'#e05650', icon:'chevron', def:'trooper'},
+    {id:'utility', label:'UTILITY', hot:'C', color:'#34d3cc', icon:'tri',     def:'scout'},
+    {id:'build',   label:'BUILD',   hot:'V', color:'#f0a53c', icon:'square',  def:'nanoturret'},
+  ];
+  const mk=(p,n,mb,eb)=>Array.from({length:n},(_,i)=>({name:`${p} ${i+1}`, metal:mb+(i+1)*15, energy:eb+(i+1)*60}));
+  const UNITS = { economy:mk('Extractor',11,30,0), combat:mk('Trooper',14,40,20), utility:mk('Scout',8,20,10), build:mk('Nanoturret',9,60,300) };
+  const PAGE=8;
+
+  // ================= unit instances on the table =================
+  const units = [];            // {mesh, def, hp, team, dest, marker}
+  const pickMeshes = [];
+  function shapeGeo(s){
+    if(s==='box') return new THREE.BoxGeometry(0.5,0.6,0.5);
+    if(s==='cone') return new THREE.ConeGeometry(0.28,0.6,6);
+    if(s==='tetra') return new THREE.TetrahedronGeometry(0.34);
+    return new THREE.CylinderGeometry(0.3,0.34,0.5,8); // cyl
+  }
+  function spawn(defKey, x, z, team){
+    const d = DEFS[defKey];
+    const col = team==='enemy' ? 0xe0605a : d.color;
+    const mesh = new THREE.Mesh(shapeGeo(d.shape), new THREE.MeshStandardMaterial({color:col, roughness:0.5, metalness:0.2, emissive:col, emissiveIntensity:0.12}));
+    mesh.position.set(x, 0.32, z); envGroup.add(mesh);
+    const u = { mesh, def:d, hp:d.hp, team, dest:null, marker:null };
+    mesh.userData.unit = u; units.push(u); pickMeshes.push(mesh); return u;
+  }
+  spawn('commander', 0, 0, 'ally');
+  spawn('trooper', 2, 1.4, 'ally');
+  spawn('trooper', 3.1, -0.6, 'ally');
+  spawn('scout', -2.2, 2.2, 'ally');
+  spawn('extractor', -3.4, -3.0, 'ally');
+  spawn('trooper', 5.4, 3.8, 'enemy');
+  spawn('scout', 6.2, 1.8, 'enemy');
+
+  // selection ring + waypoint marker
+  const selRing = new THREE.Mesh(new THREE.RingGeometry(0.42,0.5,32), new THREE.MeshBasicMaterial({color:0x9ff0dc, side:THREE.DoubleSide, transparent:true, opacity:0.9}));
+  selRing.rotation.x=-Math.PI/2; selRing.visible=false; envGroup.add(selRing);
+  function markerMesh(col){ const m=new THREE.Mesh(new THREE.ConeGeometry(0.16,0.4,4), new THREE.MeshBasicMaterial({color:col})); m.rotation.x=Math.PI; return m; }
+
+  // ================= off-hand holo surface (radial OR command face) =================
+  const CV=1024, C=CV/2, HALF=1.5, P=C/HALF;
+  const cvs=document.createElement('canvas'); cvs.width=cvs.height=CV; const g=cvs.getContext('2d');
+  const menuTex=new THREE.CanvasTexture(cvs);
+  const menuMat=new THREE.MeshBasicMaterial({map:menuTex, transparent:true, depthWrite:false});
+  const menuPlane=new THREE.Mesh(new THREE.PlaneGeometry(HALF*2,HALF*2), menuMat);
+  const menuGroup=new THREE.Group(); menuGroup.add(menuPlane); scene.add(menuGroup);
+  const pulseMat=new THREE.MeshBasicMaterial({color:0x7ff0c0, transparent:true, blending:THREE.AdditiveBlending, side:THREE.DoubleSide, depthWrite:false, opacity:0});
+  const pulse=new THREE.Mesh(new THREE.RingGeometry(0.5,0.56,48), pulseMat); pulse.position.z=0.02; menuGroup.add(pulse); let pulseT=-1;
+
+  const HUB=0.34, INa=0.40, INb=0.70, OUTa=0.76, OUTb=1.08;
+  const LX=x=>C+x*P, LY=y=>C-y*P;
+
+  function pol(r,a){ return [C+Math.sin(a)*r*P, C-Math.cos(a)*r*P]; }
+  function sector(rIn,rOut,aC,aH){ g.beginPath(); const s=16;
+    for(let i=0;i<=s;i++){ const a=aC-aH+2*aH*i/s; const [x,y]=pol(rOut,a); i?g.lineTo(x,y):g.moveTo(x,y);} 
+    for(let i=s;i>=0;i--){ const a=aC-aH+2*aH*i/s; const [x,y]=pol(rIn,a); g.lineTo(x,y);} g.closePath(); }
+  function icon(kind,x,y,s,col){ g.save(); g.translate(x,y); g.fillStyle=col;
+    if(kind==='hex'){ g.beginPath(); for(let i=0;i<6;i++){const a=i/6*6.283-1.57; i?g.lineTo(Math.cos(a)*s,Math.sin(a)*s):g.moveTo(Math.cos(a)*s,Math.sin(a)*s);} g.closePath(); g.fill(); }
+    else if(kind==='chevron'){ g.beginPath(); g.moveTo(-s,s*0.6); g.lineTo(0,-s*0.6); g.lineTo(s,s*0.6); g.lineTo(0,0); g.closePath(); g.fill(); }
+    else if(kind==='tri'){ g.beginPath(); g.moveTo(0,-s); g.lineTo(s,s*0.8); g.lineTo(-s,s*0.8); g.closePath(); g.fill(); }
+    else if(kind==='box'){ g.save(); g.rotate(0.785); g.fillRect(-s*0.8,-s*0.8,s*1.6,s*1.6); g.restore(); }
+    else { g.beginPath(); g.arc(0,0,s,0,6.283); g.fill(); }
+    g.restore(); }
+  function bar(x,y,w,frac,col){ g.fillStyle='rgba(255,255,255,0.12)'; g.fillRect(x,y,w,7); g.fillStyle=col; g.fillRect(x,y,w*Math.max(0,Math.min(1,frac)),7); }
+  function hexA(hex,a){ const n=(typeof hex==='number')?hex:parseInt(hex.slice(1),16); return `rgba(${n>>16&255},${n>>8&255},${n&255},${a})`; }
+  function hx(n){ return '#'+n.toString(16).padStart(6,'0'); }
+
+  // command verbs + button rects (local units)
+  const CMDS = ['Move','Stop','Attack','Patrol','Guard','Reclaim'];
+  const CMDCOL = {Move:0x6fdc8c, Stop:0xcfd8d8, Attack:0xe05650, Patrol:0x4a90d9, Guard:0x34d3cc, Reclaim:0xf0a53c};
+  function cmdRects(){ const rects=[]; const x0=-1.15, x1=1.15, y0=-1.08, y1=-0.06;
+    const cols=3, rows=2, pad=0.05, cw=(x1-x0)/cols, rh=(y1-y0)/rows;
+    for(let i=0;i<6;i++){ const c=i%cols, r=Math.floor(i/cols);
+      rects.push({ cmd:CMDS[i], x0:x0+c*cw+pad, x1:x0+(c+1)*cw-pad, y0:y1-(r+1)*rh+pad, y1:y1-r*rh-pad }); }
+    return rects; }
+  const CMDRECTS = cmdRects();
+
+  // ================= state =================
+  const S = { face:'radial', mAnim:1, oAnim:0, cat:null, page:0,
+    hover:null, dwell:0, hubUnit:null, dirty:true,
+    selected:null, armed:null, pendingBuild:null };
+
+  function faceFor(){ if(S.selected && !S.selected.def.build) return 'command'; return 'radial'; }
+  function refreshFace(){ const f=faceFor(); if(f!==S.face){ S.face=f; if(f==='radial'){ S.cat=null; S.oAnim=0; } S.dirty=true; } sFace.textContent=S.face; }
+
+  function catObj(){ return CATS.find(c=>c.id===S.cat); }
+  function outerItems(){ if(!S.cat) return [];
+    const all=UNITS[S.cat], st=S.page*PAGE, slice=all.slice(st,st+PAGE);
+    const items=slice.map(u=>({kind:'unit', label:u.name.split(' ')[1], ref:u, color:catObj().color}));
+    const mp=Math.ceil(all.length/PAGE)-1; if(mp>0){ const back=(st+PAGE>=all.length); items.push({kind:'page', label:back?'«':'»', color:'#9fb4b8'}); }
+    return items; }
+
+  // ---------- draw dispatch ----------
+  function draw(){ g.clearRect(0,0,CV,CV); if(S.mAnim<=0.01) return;
+    if(S.face==='radial') drawRadial(); else drawCommand(); menuTex.needsUpdate=true; }
+
+  function drawRadial(){
+    const ease=S.mAnim, oe=S.oAnim;
+    g.strokeStyle='rgba(120,200,190,0.10)'; g.lineWidth=1.5;
+    [HUB,INb,OUTb].forEach(r=>{ g.beginPath(); g.arc(C,C,r*P,0,6.283); g.stroke(); });
+    const n=CATS.length, step=6.283/n, gap=0.05;
+    CATS.forEach((c,i)=>{ const aC=i*step, hov=(S.hover&&S.hover.kind==='cat'&&S.hover.idx===i);
+      const rOut=INa+(INb-INa)*ease; sector(INa,rOut,aC,step/2-gap);
+      g.fillStyle=hexA(c.color, hov?0.5:(c.id===S.cat?0.34:0.16)); g.fill();
+      g.lineWidth=2; g.strokeStyle=hexA(c.color, hov?1:0.55); g.stroke();
+      if(hov){ g.save(); g.shadowColor=c.color; g.shadowBlur=26; g.stroke(); g.restore(); }
+      if(hov&&S.dwell>0){ const a0=aC-(step/2-gap), a1=a0+(step-2*gap)*S.dwell; const [sx,sy]=pol(rOut+0.02,a0); g.beginPath(); g.moveTo(sx,sy);
+        for(let t=0;t<=1;t+=0.1){ const a=a0+(a1-a0)*t; const [x,y]=pol(rOut+0.02,a); g.lineTo(x,y);} g.strokeStyle='#eafffb'; g.lineWidth=5; g.stroke(); }
+      const [ix,iy]=pol((INa+rOut)/2,aC); icon(c.icon,ix,iy-14,20,hexA(c.color,hov?1:0.85));
+      g.fillStyle=hov?'#fff':'#cfe6e2'; g.font='700 22px Segoe UI'; g.textAlign='center'; g.fillText(c.label,ix,iy+30);
+      g.fillStyle=hexA(c.color,0.9); g.font='600 16px Segoe UI'; g.fillText('['+c.hot+']',ix,iy+50); });
+    if(S.cat&&oe>0.02){ const items=outerItems(), m=items.length, os=6.283/m, og=0.045, rIn=OUTa, rOut=OUTa+(OUTb-OUTa)*oe;
+      items.forEach((it,i)=>{ const aC=i*os, hov=(S.hover&&S.hover.kind==='unit'&&S.hover.idx===i);
+        sector(rIn+(rOut-rIn)*(1-oe),rOut,aC,os/2-og); g.fillStyle=hexA(it.color,hov?0.5:0.15); g.fill();
+        g.lineWidth=2; g.strokeStyle=hexA(it.color,hov?1:0.5); g.stroke();
+        if(hov){ g.save(); g.shadowColor=it.color; g.shadowBlur=22; g.stroke(); g.restore(); }
+        const [ix,iy]=pol((rIn+rOut)/2,aC);
+        if(it.kind==='unit'){ icon(catObj().icon,ix,iy-10,13,hexA(it.color,hov?1:0.8)); g.fillStyle=hov?'#fff':'#bcd6d2'; g.font='700 20px Segoe UI'; g.textAlign='center'; g.fillText(it.label,ix,iy+22); }
+        else { g.fillStyle=hov?'#fff':'#cfe6e2'; g.font='700 40px Segoe UI'; g.textAlign='center'; g.fillText(it.label,ix,iy+14); } }); }
+    // hub
+    g.save(); g.beginPath(); g.arc(C,C,HUB*P,0,6.283); g.fillStyle='rgba(8,16,18,0.86)'; g.fill();
+    g.lineWidth=2; g.strokeStyle='rgba(140,220,210,0.4)'; g.stroke(); g.textAlign='center';
+    if(S.cat){ const c=catObj(); icon(c.icon,C,C-24,26,c.color); g.fillStyle='#eafffb'; g.font='700 30px Segoe UI'; g.fillText(c.label,C,C+26);
+      const mp=Math.ceil(UNITS[S.cat].length/PAGE); g.fillStyle='#7f9a96'; g.font='600 16px Segoe UI'; g.fillText(`page ${S.page+1}/${mp}`,C,C+52); }
+    else { g.strokeStyle='rgba(180,240,230,0.6)'; g.lineWidth=2; g.beginPath(); g.moveTo(C-18,C); g.lineTo(C+18,C); g.moveTo(C,C-18); g.lineTo(C,C+18); g.stroke();
+      g.fillStyle='#8fb0ac'; g.font='600 16px Segoe UI'; g.fillText('BUILD',C,C+44); }
+    g.restore();
+  }
+
+  function drawCommand(){
+    const u=S.selected; if(!u){ return; } const d=u.def; const col = u.team==='enemy'?0xe0605a:d.color;
+    // panel bg
+    roundRect(LX(-1.28),LY(1.2),2.56*P,2.4*P,18); g.fillStyle='rgba(8,16,18,0.9)'; g.fill(); g.lineWidth=2; g.strokeStyle=hexA(col,0.5); g.stroke();
+    // bio: icon
+    g.save(); const ix=LX(-0.86), iy=LY(0.66);
+    g.beginPath(); g.arc(ix,iy,58,0,6.283); g.fillStyle='rgba(20,32,34,0.9)'; g.fill(); g.lineWidth=3; g.strokeStyle=hexA(col,0.8); g.stroke();
+    icon(shapeToIcon(d.shape), ix, iy, 30, hx(col)); g.restore();
+    // name / role / team
+    g.textAlign='left'; g.fillStyle='#eafffb'; g.font='700 40px Segoe UI'; g.fillText(d.name, LX(-0.5), LY(0.82));
+    g.fillStyle=hexA(col,0.9); g.font='600 22px Segoe UI'; g.fillText(d.role.toUpperCase(), LX(-0.5), LY(0.6));
+    g.fillStyle = u.team==='enemy' ? '#e0807a' : '#7fd0a0'; g.font='700 18px Segoe UI'; g.fillText(u.team==='enemy'?'● HOSTILE':'● ALLIED', LX(-0.5), LY(0.42));
+    // HP bar
+    g.fillStyle='#8fb0ac'; g.font='600 16px Segoe UI'; g.textAlign='left'; g.fillText('HEALTH', LX(-1.15), LY(0.24));
+    bar(LX(-1.15), LY(0.18), 2.0*P, u.hp/d.hp, u.hp/d.hp>0.35?'#6fdc8c':'#e0705a');
+    g.fillStyle='#dfeef0'; g.textAlign='right'; g.fillText(`${u.hp} / ${d.hp}`, LX(1.05), LY(0.24));
+    // stat chips
+    const stats=[['COST', d.m||d.e ? `${d.m}M ${d.e}E` : '—'], ['SPEED', d.speed?d.speed.toFixed(1):'static'], ['DPS', d.dps||'—'], ['CLASS', d.structure?'structure':'mobile']];
+    stats.forEach((s,i)=>{ const x=LX(-1.15)+i*(2.3*P/4); g.textAlign='left'; g.fillStyle='#6f8a86'; g.font='600 14px Segoe UI'; g.fillText(s[0], x, LY(0.02));
+      g.fillStyle='#dfeef0'; g.font='700 20px Segoe UI'; g.fillText(String(s[1]), x, LY(-0.08)); });
+    // description
+    g.fillStyle='#9fb8b4'; g.font='400 17px Segoe UI'; wrapText(d.desc, LX(-1.15), LY(-0.2), 2.3*P, 22);
+    // command buttons
+    CMDRECTS.forEach(r=>{ const hov=(S.hover&&S.hover.kind==='cmd'&&S.hover.cmd===r.cmd); const armed=(S.armed===r.cmd);
+      const c=CMDCOL[r.cmd]; const disabled = (u.team==='enemy') || (d.structure && r.cmd!=='Stop' && r.cmd!=='Guard');
+      roundRect(LX(r.x0),LY(r.y1), (r.x1-r.x0)*P, (r.y1-r.y0)*P, 10);
+      g.fillStyle = disabled?'rgba(30,38,40,0.6)': hexA(c, armed?0.55: hov?0.4:0.16); g.fill();
+      g.lineWidth=2; g.strokeStyle = disabled?'rgba(90,110,110,0.4)': hexA(c, armed?1:(hov?0.9:0.5)); g.stroke();
+      g.textAlign='center'; g.fillStyle = disabled?'#5f7a80':(hov||armed?'#fff':'#cfe6e2'); g.font='700 22px Segoe UI';
+      g.fillText(r.cmd.toUpperCase(), LX((r.x0+r.x1)/2), LY((r.y0+r.y1)/2)+8); });
+  }
+  function shapeToIcon(s){ return s==='box'?'box': s==='cone'?'chevron': s==='tetra'?'tri':'hex'; }
+  function roundRect(x,y,w,h,r){ g.beginPath(); g.moveTo(x+r,y); g.arcTo(x+w,y,x+w,y+h,r); g.arcTo(x+w,y+h,x,y+h,r); g.arcTo(x,y+h,x,y,r); g.arcTo(x,y,x+w,y,r); g.closePath(); }
+  function wrapText(t,x,y,maxW,lh){ const words=t.split(' '); let line='', yy=y; for(const w of words){ const test=line+w+' ';
+    if(g.measureText(test).width>maxW && line){ g.fillText(line,x,yy); line=w+' '; yy+=lh; } else line=test; } g.fillText(line,x,yy); }
+
+  // ================= hit-test =================
+  const ray=new THREE.Raycaster(), aimRay=new THREE.Ray(), nd=new THREE.Vector2();
+  const _n=new THREE.Vector3(),_r=new THREE.Vector3(),_u=new THREE.Vector3(),_p=new THREE.Vector3(),_plane=new THREE.Plane();
+  const reticle=document.getElementById('reticle'), sFace=document.getElementById('s-face'), sSel=document.getElementById('s-sel'), sCmd=document.getElementById('s-cmd');
+  const reticle3D=new THREE.Mesh(new THREE.SphereGeometry(0.006,12,12), new THREE.MeshBasicMaterial({color:0x9ff0dc})); reticle3D.visible=false; scene.add(reticle3D);
+
+  function hitTest(){ S.hover=null; let hubU=null;
+    if(S.mAnim<0.85){ reticle.classList.remove('hover'); reticle3D.visible=false; if(S.hubUnit){S.hubUnit=null;S.dirty=true;} return; }
+    _n.set(0,0,1).applyQuaternion(menuGroup.quaternion); _r.set(1,0,0).applyQuaternion(menuGroup.quaternion); _u.set(0,1,0).applyQuaternion(menuGroup.quaternion);
+    _plane.setFromNormalAndCoplanarPoint(_n, menuGroup.position);
+    if(!aimRay.intersectPlane(_plane,_p)){ reticle.classList.remove('hover'); reticle3D.visible=false; if(S.hubUnit){S.hubUnit=null;S.dirty=true;} return; }
+    reticle3D.position.copy(_p); reticle3D.visible=inVR();
+    const sc=menuGroup.scale.x||1; _p.sub(menuGroup.position); const lx=_p.dot(_r)/sc, ly=_p.dot(_u)/sc, rr=Math.hypot(lx,ly);
+    if(S.face==='radial'){ let a=Math.atan2(lx,ly); if(a<0)a+=6.283;
+      if(rr>=INa&&rr<=INb){ const step=6.283/CATS.length; S.hover={kind:'cat', idx:Math.floor((a+step/2)/step)%CATS.length}; }
+      else if(S.cat&&S.oAnim>0.85&&rr>=OUTa&&rr<=OUTb){ const items=outerItems(); const step=6.283/items.length; const idx=Math.floor((a+step/2)/step)%items.length;
+        S.hover={kind: items[idx].kind==='page'?'page':'unit', idx}; if(items[idx].kind==='unit') hubU=items[idx].ref; } }
+    else { for(const rc of CMDRECTS){ if(lx>=rc.x0&&lx<=rc.x1&&ly>=rc.y0&&ly<=rc.y1){ S.hover={kind:'cmd', cmd:rc.cmd}; break; } } }
+    reticle.classList.toggle('hover', !!S.hover);
+    if(hubU!==S.hubUnit){ S.hubUnit=hubU; S.dirty=true; }
+  }
+
+  // ================= actions =================
+  function selectCategory(id){ if(S.cat===id) return; S.cat=id; S.page=0; S.oAnim=0; S.dirty=true; }
+  function nextPage(){ const mp=Math.ceil(UNITS[S.cat].length/PAGE)-1; S.page=S.page>=mp?0:S.page+1; S.oAnim=0.35; S.dirty=true; }
+  function setPendingBuild(name){ S.pendingBuild={ defKey:catObj().def, name }; ghost.visible=true; firePulse(); }
+  function selectUnit(u){ S.selected=u; S.armed=null; sSel.textContent=u?`${u.def.name}${u.team==='enemy'?' (enemy)':''}`:'—'; sCmd.textContent='—';
+    if(u){ selRing.visible=true; selRing.material.color.set(u.team==='enemy'?0xe0605a:0x9ff0dc); } else selRing.visible=false; refreshFace(); S.dirty=true; }
+  function deselect(){ S.selected=null; S.armed=null; selRing.visible=false; sSel.textContent='—'; sCmd.textContent='—'; refreshFace(); S.dirty=true; }
+  function armCommand(cmd){ const u=S.selected; if(!u||u.team==='enemy') return; if(u.def.structure && cmd!=='Stop' && cmd!=='Guard') return;
+    if(cmd==='Stop'){ clearDest(u); S.armed=null; sCmd.textContent='Stop'; S.dirty=true; return; }
+    S.armed=cmd; sCmd.textContent=cmd; S.dirty=true; firePulse(); }
+  function firePulse(){ pulseT=0; }
+
+  function clearDest(u){ u.dest=null; if(u.marker){ envGroup.remove(u.marker); u.marker=null; } }
+  function issueMove(u, localPt, cmd){ if(u.def.speed<=0) return; u.dest=localPt.clone(); u.dest.y=u.mesh.position.y;
+    if(u.marker) envGroup.remove(u.marker); const col=CMDCOL[cmd]||0x6fdc8c; u.marker=markerMesh(col); u.marker.position.copy(u.dest); u.marker.position.y=0.6; envGroup.add(u.marker); }
+
+  function pinch(){
+    if(S.hover){ // surface interaction
+      if(S.face==='radial'){ if(S.hover.kind==='cat') selectCategory(CATS[S.hover.idx].id);
+        else if(S.hover.kind==='page') nextPage();
+        else if(S.hover.kind==='unit'){ const it=outerItems()[S.hover.idx]; setPendingBuild(it.ref.name); } }
+      else if(S.hover.kind==='cmd'){ armCommand(S.hover.cmd); }
+      return;
+    }
+    // world interaction
+    ray.set(aimRay.origin, aimRay.direction);
+    const uHit=ray.intersectObjects(pickMeshes,false)[0];
+    const tHit=ray.intersectObject(table,false)[0];
+    if(S.pendingBuild && tHit){ const lp=envGroup.worldToLocal(tHit.point.clone()); const u=spawn(S.pendingBuild.defKey, lp.x, lp.z, 'ally'); S.pendingBuild=null; ghost.visible=false; firePulse(); selectUnit(u); return; }
+    if(S.selected && S.selected.team!=='enemy' && S.armed && S.armed!=='Stop'){ // issue armed command to a target
+      const target = uHit ? uHit.object.userData.unit : null;
+      const pt = target ? target.mesh.position.clone() : (tHit? envGroup.worldToLocal(tHit.point.clone()):null);
+      if(pt){ issueMove(S.selected, pt, S.armed); } S.armed=null; sCmd.textContent='—'; S.dirty=true; return;
+    }
+    if(uHit){ selectUnit(uHit.object.userData.unit); return; }
+    if(tHit){ if(S.selected && S.selected.team!=='enemy' && !S.selected.def.structure){ issueMove(S.selected, envGroup.worldToLocal(tHit.point.clone()), 'Move'); } else deselect(); return; }
+  }
+
+  // ghost placement preview
+  const ghost=new THREE.Mesh(new THREE.CylinderGeometry(0.3,0.35,0.5,6), new THREE.MeshStandardMaterial({color:0x7ff0c0, transparent:true, opacity:0.5}));
+  ghost.visible=false; envGroup.add(ghost);
+
+  // ================= XR controllers =================
+  const _q=new THREE.Quaternion(); const controllers=[];
+  function addController(i){ const c=renderer.xr.getController(i), grip=renderer.xr.getControllerGrip(i); scene.add(c); scene.add(grip);
+    const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,0),new THREE.Vector3(0,0,-2)]), new THREE.LineBasicMaterial({color:0x7ff0c0})); c.add(line);
+    c.userData.hand=null;
+    c.addEventListener('connected', e=>{ c.userData.hand=e.data&&e.data.handedness; });
+    c.addEventListener('disconnected', ()=>{ c.userData.hand=null; });
+    c.addEventListener('selectstart', ()=>{ if(inVR() && anchorObj().ctrl===c) return; pinch(); });
+    c.addEventListener('squeezestart', ()=>{ grabState(c,true); });
+    c.addEventListener('squeezeend',   ()=>{ grabState(c,false); });
+    controllers.push({ctrl:c,grip:grip,grabbing:false}); }
+  addController(0); addController(1);
+  function anchorObj(){ return controllers.find(o=>o.ctrl.userData.hand==='left')||controllers[0]; }
+  function aimObj(){ return controllers.find(o=>o.ctrl.userData.hand==='right')||controllers[1]; }
+  function grabState(c,on){ const o=controllers.find(o=>o.ctrl===c); if(o){ o.grabbing=on; } }
+
+  // ================= grab-to-transform =================
+  const userXform={ pan:new THREE.Vector3(), yaw:0, zoom:1 };
+  const _gw=new THREE.Vector3(), _gw2=new THREE.Vector3(), _tmpA=new THREE.Vector3(), _tmpB=new THREE.Vector3();
+  let lastGrab=null; // {mode:'one'|'two', ...}
+  function updateGrabVR(){
+    const grabbers=controllers.filter(o=>o.grabbing);
+    if(grabbers.length===0){ lastGrab=null; return; }
+    if(grabbers.length===1){ grabbers[0].grip.getWorldPosition(_gw);
+      if(lastGrab&&lastGrab.mode==='one'){ _tmpA.copy(tableRoot.worldToLocal(_gw.clone())); _tmpB.copy(tableRoot.worldToLocal(lastGrab.p.clone())); userXform.pan.add(_tmpA.sub(_tmpB)); }
+      lastGrab={mode:'one', p:_gw.clone()}; }
+    else { grabbers[0].grip.getWorldPosition(_gw); grabbers[1].grip.getWorldPosition(_gw2);
+      const mid=_gw.clone().add(_gw2).multiplyScalar(0.5); const dist=_gw.distanceTo(_gw2); const ang=Math.atan2(_gw2.x-_gw.x, _gw2.z-_gw.z);
+      if(lastGrab&&lastGrab.mode==='two'){ _tmpA.copy(tableRoot.worldToLocal(mid.clone())); _tmpB.copy(tableRoot.worldToLocal(lastGrab.mid.clone())); userXform.pan.add(_tmpA.sub(_tmpB));
+        userXform.zoom*= dist/(lastGrab.dist||dist); userXform.yaw += (ang-lastGrab.ang); }
+      lastGrab={mode:'two', mid:mid.clone(), dist, ang}; }
+    userXform.zoom=Math.max(0.3, Math.min(4, userXform.zoom));
+  }
+  function applyXform(){ envGroup.position.copy(userXform.pan); envGroup.rotation.y=userXform.yaw; envGroup.scale.setScalar(userXform.zoom); }
+
+  // desktop grab controls
+  let rmb=false, shift=false, lastX=0,lastY=0;
+  addEventListener('contextmenu', e=>e.preventDefault());
+  addEventListener('mousedown', e=>{ if(e.button===2){ rmb=true; lastX=e.clientX; lastY=e.clientY; } else if(e.button===0){ reticle.classList.add('pinch'); pinch(); } });
+  addEventListener('mouseup', e=>{ if(e.button===2) rmb=false; if(e.button===0) reticle.classList.remove('pinch'); });
+  addEventListener('mousemove', e=>{ nd.x=e.clientX/innerWidth*2-1; nd.y=-(e.clientY/innerHeight)*2+1; reticle.style.left=e.clientX+'px'; reticle.style.top=e.clientY+'px';
+    if(rmb){ const dx=(e.clientX-lastX), dy=(e.clientY-lastY); lastX=e.clientX; lastY=e.clientY;
+      if(shift){ userXform.pan.x += dx*0.02; userXform.pan.z += dy*0.02; } else { userXform.yaw += dx*0.006; } } });
+  addEventListener('wheel', e=>{ userXform.zoom=Math.max(0.3,Math.min(4, userXform.zoom*(e.deltaY<0?1.08:0.925))); }, {passive:true});
+  addEventListener('keydown', e=>{ if(e.key==='Shift') shift=true; if(e.key==='Escape') deselect(); if(e.repeat) return; if(e.key.toLowerCase()==='b'){ deselect(); } });
+  addEventListener('keyup', e=>{ if(e.key==='Shift') shift=false; });
+
+  // dwell (radial categories only)
+  let dwellIdx=-1, dwellStart=0; const DWELL=650;
+  function updateDwell(dt){ if(S.face==='radial' && S.hover && S.hover.kind==='cat'){ if(S.hover.idx!==dwellIdx){ dwellIdx=S.hover.idx; dwellStart=performance.now(); }
+      const p=Math.min(1,(performance.now()-dwellStart)/DWELL); if(p!==S.dwell){ S.dwell=p; S.dirty=true; } if(p>=1){ selectCategory(CATS[S.hover.idx].id); dwellIdx=-1; S.dwell=0; } }
+    else { if(S.dwell!==0){ S.dwell=0; S.dirty=true; } dwellIdx=-1; } }
+
+  // ================= aim ray + head pose =================
+  const _cp=new THREE.Vector3(), _cq=new THREE.Quaternion(), _hp=new THREE.Vector3(), _hq=new THREE.Quaternion();
+  function updateAimRay(){ if(inVR()){ const c=aimObj().ctrl; c.getWorldPosition(_cp); c.getWorldQuaternion(_cq); aimRay.origin.copy(_cp); aimRay.direction.set(0,0,-1).applyQuaternion(_cq).normalize(); }
+    else { ray.setFromCamera(nd,camera); aimRay.copy(ray.ray); } }
+  function headPose(){ if(inVR()){ const cam=renderer.xr.getCamera(); cam.getWorldPosition(_hp); cam.getWorldQuaternion(_hq); } else { camera.getWorldPosition(_hp); camera.getWorldQuaternion(_hq); } }
+
+  // ================= loop =================
+  const clock=new THREE.Clock();
+  function frame(){ const dt=Math.min(60, clock.getDelta()*1000);
+    layoutBase(); headPose(); updateAimRay(); if(inVR()) updateGrabVR(); applyXform();
+
+    refreshFace();
+    const oT=S.cat?1:0; if(Math.abs(S.oAnim-oT)>0.001){ S.oAnim+=(oT-S.oAnim)*Math.min(1,dt/110); S.dirty=true; } else S.oAnim=oT;
+
+    // anchor surface
+    if(inVR()){ anchorObj().grip.getWorldPosition(_cp); menuGroup.position.copy(_cp); menuGroup.position.y+=0.02; menuGroup.scale.setScalar(0.075); }
+    else { menuGroup.position.set(-2.6,2.3,1.6); menuGroup.scale.setScalar(1); }
+    menuGroup.quaternion.copy(_hq);
+    menuPlane.scale.setScalar(0.85+0.15*S.mAnim); menuMat.opacity=S.mAnim; reticle.style.display=inVR()?'none':'block';
+
+    if(pulseT>=0){ pulseT+=dt/380; const t=pulseT; pulse.scale.setScalar(0.9+t*1.6); pulseMat.opacity=Math.max(0,0.8*(1-t)); if(t>=1)pulseT=-1; }
+
+    hitTest(); updateDwell(dt);
+    if(S.dirty){ draw(); S.dirty=false; }
+
+    // unit movement
+    for(const u of units){ if(u.dest){ const m=u.mesh.position; const dx=u.dest.x-m.x, dz=u.dest.z-m.z; const d=Math.hypot(dx,dz);
+      if(d<0.08){ clearDest(u); } else { const sp=u.def.speed*dt*0.0016; const k=Math.min(1, sp/d); m.x+=dx*k; m.z+=dz*k; u.mesh.rotation.y=Math.atan2(dx,dz); } } }
+    // selection ring follows
+    if(S.selected){ selRing.position.set(S.selected.mesh.position.x, 0.02, S.selected.mesh.position.z); const s=1+0.04*Math.sin(performance.now()*0.005); selRing.scale.setScalar(s); }
+    // ghost follows aim
+    if(S.pendingBuild){ ray.set(aimRay.origin, aimRay.direction); const h=ray.intersectObject(table,false)[0]; if(h){ const lp=envGroup.worldToLocal(h.point.clone()); ghost.position.set(lp.x, 0.25, lp.z); } }
+
+    renderer.render(scene,camera);
+  }
+  refreshFace(); renderer.setAnimationLoop(frame);
+
+  // ================= VR entry =================
+  const vrBtn=document.getElementById('vr-btn');
+  if(navigator.xr){ navigator.xr.isSessionSupported('immersive-vr').then(ok=>{ if(!ok){ vrBtn.textContent='VR not supported here'; vrBtn.classList.add('disabled'); return; }
+    vrBtn.addEventListener('click', async ()=>{ if(inVR()){ renderer.xr.getSession().end(); return; }
+      try{ const session=await navigator.xr.requestSession('immersive-vr',{optionalFeatures:['local-floor','bounded-floor','hand-tracking']}); await renderer.xr.setSession(session);
+        vrBtn.textContent='Exit VR'; session.addEventListener('end', ()=>{ vrBtn.textContent='Enter VR'; reticle3D.visible=false; }); }
+      catch(err){ vrBtn.textContent='Enter VR failed'; } }); });
+  } else { vrBtn.textContent='WebXR unavailable'; vrBtn.classList.add('disabled'); }
+})();
+</script>
+</body>
+</html>
